@@ -1,17 +1,22 @@
 import asyncio
+import os
+import threading
+
 import aiohttp
 import xml.dom.minidom
 import random
-import json
 from struct import *
 import json
 import config
 import re
 
+
 class bilibiliClient():
-    def __init__(self):
+    loaded = False
+
+    def __init__(self, vote, room_ID):
         self._CIDInfoUrl = 'http://live.bilibili.com/api/player?id=cid:'
-        self._roomId = 0
+        self._roomId = room_ID
         self._ChatPort = 788
         self._protocolversion = 1
         self._reader = 0
@@ -19,12 +24,35 @@ class bilibiliClient():
         self.connected = False
         self._UserCount = 0
         self._ChatHost = 'livecmt-1.bilibili.com'
+        self.votedUser = []
+        self.vote = vote
 
-        self._roomId = input('请输入房间号：')
-        self._roomId = int(self._roomId)
+    def reset(self):
+        for i in self.vote.keys():
+            self.vote[i] = 0
+        print("已清空投票")
+
+    def load(self, inp):
+        bilibiliClient.votedUser = []
+        newvote = {}
+        try:
+            new_file_object = open(os.path.split(os.path.realpath(__file__))[0] + "/" + inp)
+        except FileNotFoundError:
+            print("找不到投票列表文件: " + inp)
+            return
+        try:
+            for line in new_file_object:
+                newvote[line.replace("\n", "")] = 0
+        finally:
+            new_file_object.close()
+        self.vote = newvote
+        print("成功更换投票内容列表!")
+
+    def getVote(self):
+        return self.vote
 
     async def connectServer(self):
-        print ('正在进入房间。。。。。')
+        print('进入房间中...')
         with aiohttp.ClientSession() as s:
             async with s.get('http://live.bilibili.com/' + str(self._roomId)) as r:
                 html = await r.text()
@@ -38,16 +66,15 @@ class bilibiliClient():
                 server = root.getElementsByTagName('server')
                 self._ChatHost = server[0].firstChild.data
 
-
-
         reader, writer = await asyncio.open_connection(self._ChatHost, self._ChatPort)
         self._reader = reader
         self._writer = writer
-        print ('链接弹幕中。。。。。')
+        print('链接弹幕中...')
         if (await self.SendJoinChannel(self._roomId) == True):
             self.connected = True
-            print ('进入房间成功。。。。。')
-            print ('链接弹幕成功。。。。。')
+            print('连接、加载成功!')
+            print('===投票开始===')
+            self.loaded = True
             await self.ReceiveMessageLoop()
 
     async def HeartbeatLoop(self):
@@ -58,13 +85,11 @@ class bilibiliClient():
             await self.SendSocketData(0, 16, self._protocolversion, 2, 1, "")
             await asyncio.sleep(30)
 
-
     async def SendJoinChannel(self, channelId):
-        self._uid = (int)(100000000000000.0 + 200000000000000.0*random.random())
+        self._uid = (int)(100000000000000.0 + 200000000000000.0 * random.random())
         body = '{"roomid":%s,"uid":%s}' % (channelId, self._uid)
         await self.SendSocketData(0, 16, self._protocolversion, 7, 1, body)
         return True
-
 
     async def SendSocketData(self, packetlength, magic, ver, action, param, body):
         bytearr = body.encode('utf-8')
@@ -75,7 +100,6 @@ class bilibiliClient():
             sendbytes = sendbytes + bytearr
         self._writer.write(sendbytes)
         await self._writer.drain()
-
 
     async def ReceiveMessageLoop(self):
         while self.connected == True:
@@ -90,22 +114,22 @@ class bilibiliClient():
 
             if num2 != 0:
                 num -= 1
-                if num==0 or num==1 or num==2:
+                if num == 0 or num == 1 or num == 2:
                     tmp = await self._reader.read(4)
                     num3, = unpack('!I', tmp)
-                    print ('房间人数为 %s' % num3)
+                    # print('房间人数为 %s' % num3)
                     self._UserCount = num3
                     continue
-                elif num==3 or num==4:
+                elif num == 3 or num == 4:
                     tmp = await self._reader.read(num2)
                     # strbytes, = unpack('!s', tmp)
-                    try: # 为什么还会出现 utf-8 decode error??????
+                    try:  # 为什么还会出现 utf-8 decode error??????
                         messages = tmp.decode('utf-8')
                     except:
                         continue
                     self.parseDanMu(messages)
                     continue
-                elif num==5 or num==6 or num==7:
+                elif num == 5 or num == 6 or num == 7:
                     tmp = await self._reader.read(num2)
                     continue
                 else:
@@ -117,14 +141,14 @@ class bilibiliClient():
     def parseDanMu(self, messages):
         try:
             dic = json.loads(messages)
-        except: # 有些情况会 jsondecode 失败，未细究，可能平台导致
+        except:  # 有些情况会 jsondecode 失败，未细究，可能平台导致
             return
         cmd = dic['cmd']
         if cmd == 'LIVE':
-            print ('直播开始。。。')
+            print('直播开始...')
             return
         if cmd == 'PREPARING':
-            print ('房主准备中。。。')
+            print('房主准备中...')
             return
         if cmd == 'DANMU_MSG':
             commentText = dic['info'][1]
@@ -136,7 +160,14 @@ class bilibiliClient():
             if isVIP:
                 commentUser = 'VIP ' + commentUser
             try:
-                print (commentUser + ' say: ' + commentText)
+                if not commentUser in self.votedUser:
+                    for key in self.vote.keys():
+                        for k in key.split("/"):
+                            if k in commentText:
+                                self.vote[key] += 1
+                                print(commentUser + ' 投票了 ' + key)
+                                self.votedUser.append(commentUser)
+                                break
             except:
                 pass
             return
@@ -153,7 +184,7 @@ class bilibiliClient():
         if cmd == 'WELCOME' and config.TURN_WELCOME == 1:
             commentUser = dic['data']['uname']
             try:
-                print ('欢迎 ' + commentUser + ' 进入房间。。。。')
+                print('欢迎 ' + commentUser + ' 进入房间...。')
             except:
                 pass
             return
